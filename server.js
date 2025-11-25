@@ -292,7 +292,7 @@ app.post("/api/schedule", async (req, res) => {
 });
 
 // ========================================================
-// --- 6. FUNGSI BANTUAN & START SERVER ---
+// --- 6. FUNGSI BANTUAN & SERVER START ---
 // ========================================================
 
 // Fungsi bantuan untuk mengirim pesan WhatsApp via Twilio
