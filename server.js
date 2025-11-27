@@ -1,7 +1,3 @@
-// ========================================================
-// Bismillah - Backend Smart Kandang Maggenzim (Final)
-// ========================================================
-
 // --- 1. IMPOR LIBRARY ---
 require("dotenv").config();
 const express = require("express");
@@ -21,7 +17,7 @@ app.use(express.urlencoded({ extended: true })); // Membaca form data (untuk Web
 // Koneksi Database (Neon PostgreSQL)
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }, // Wajib untuk koneksi SSL ke Neon
+  ssl: { rejectUnauthorized: false },
 });
 
 // Klien Twilio (WhatsApp)
@@ -34,7 +30,7 @@ const twilioClient = twilio(
 const mqttClient = mqtt.connect(process.env.MQTT_BROKER_URL, {
   username: process.env.MQTT_USERNAME,
   password: process.env.MQTT_PASSWORD,
-  protocol: "mqtts", // Menggunakan koneksi aman (TLS/SSL)
+  protocol: "mqtts",
   port: 8883,
 });
 
@@ -52,36 +48,35 @@ mqttClient.on("connect", () => {
 // Fungsi ini berjalan setiap kali ada data sensor masuk
 mqttClient.on("message", async (topic, message) => {
   try {
-    const deviceId = topic.split("/")[1]; // Ambil ID dari topik "devices/SENSOR-XXX/data"
-
-    // Parse data, menangani format Array [...] atau Objek {...}
+    const deviceId = topic.split("/")[1];
     let rawData = JSON.parse(message.toString());
     let data;
+
     if (Array.isArray(rawData) && rawData.length > 0) {
-      data = rawData[0]; // Ambil item pertama jika array
+      data = rawData[0];
     } else if (typeof rawData === "object" && rawData !== null) {
-      data = rawData; // Gunakan langsung jika objek
+      data = rawData;
     } else {
       console.error(`⚠️ Format data dari ${deviceId} tidak dikenali.`);
       return;
     }
 
     // Validasi kelengkapan data
-    if (!data || data.temperature === undefined || data.amonia === undefined) {
+    const gasValue = data.gas_ppm !== undefined ? data.gas_ppm : data.amonia;
+    if (data.temperature === undefined || gasValue === undefined) {
       console.error(
-        `⚠️ Data dari ${deviceId} tidak lengkap (butuh temperature & amonia).`
+        `⚠️ Data dari ${deviceId} tidak lengkap (butuh temperature & gas).`
       );
       return;
     }
-
     console.log(
-      `📥 Menerima data dari ${deviceId}: Suhu=${data.temperature}, Gas=${data.amonia}`
+      `📥 Menerima data dari ${deviceId}: Suhu=${data.temperature}, Gas=${gasValue}`
     );
 
     // 1. Simpan data ke database Neon
     await pool.query(
       "INSERT INTO sensor_data(device_id, temperature, humidity, gas_ppm) VALUES($1, $2, $3, $4)",
-      [deviceId, data.temperature, data.humidity, data.amonia]
+      [deviceId, data.temperature, data.humidity, gasValue]
     );
 
     // 2. Cek apakah perangkat terdaftar untuk notifikasi
@@ -89,15 +84,15 @@ mqttClient.on("message", async (topic, message) => {
       "SELECT * FROM devices WHERE device_id = $1",
       [deviceId]
     );
-    if (deviceRes.rows.length === 0) return; // Perangkat tidak dikenal, selesai.
+    if (deviceRes.rows.length === 0) return;
 
     // 3. Cek ambang batas (Threshold) untuk peringatan
     const device = deviceRes.rows[0];
     let alertMessage = "";
-    if (data.temperature > device.threshold_temp) {
+    if (Number(data.temperature) > Number(device.threshold_temp)) {
       alertMessage = `⚠️ PERINGATAN! Suhu di ${device.device_name} mencapai ${data.temperature}°C (Batas: ${device.threshold_temp}°C).`;
-    } else if (data.amonia > device.threshold_gas) {
-      alertMessage = `⚠️ PERINGATAN! Kadar gas di ${device.device_name} mencapai ${data.amonia} PPM (Batas: ${device.threshold_gas} PPM).`;
+    } else if (Number(gasValue) > Number(device.threshold_gas)) {
+      alertMessage = `⚠️ PERINGATAN! Kadar gas di ${device.device_name} mencapai ${gasValue} PPM (Batas: ${device.threshold_gas} PPM).`;
     }
 
     // 4. Jika ada peringatan, kirim WhatsApp ke pemilik
@@ -129,7 +124,7 @@ app.post("/whatsapp-webhook", async (req, res) => {
     try {
       // 1. Cari perangkat milik nomor WA tersebut
       const deviceRes = await pool.query(
-        "SELECT d.device_id, d.device_name FROM devices d JOIN users u ON d.user_id = u.user_id WHERE u.whatsapp_number = $1 LIMIT 1",
+        "SELECT d.device_id, d.device_name, d.threshold_temp, d.threshold_gas FROM devices d JOIN users u ON d.user_id = u.user_id WHERE u.whatsapp_number = $1 LIMIT 1",
         [fromNumber.replace("whatsapp:", "")]
       );
 
@@ -157,16 +152,27 @@ app.post("/whatsapp-webhook", async (req, res) => {
       }
       const latestData = dataRes.rows[0];
 
-      // 3. Format dan kirim balasan
-      // Waktu diubah ke WIB (UTC+7) secara manual agar simpel
-      const waktuWIB = new Date(
-        new Date(latestData.timestamp).getTime() + 7 * 60 * 60 * 1000
-      );
-      const timeString = waktuWIB.toLocaleTimeString("id-ID", {
-        timeZone: "UTC",
-      });
+      // --- [BAGIAN PERUBAHAN TAMPILAN] ---
+      // A. Format Data Angka
+      const suhuFormatted = Number(latestData.temperature).toFixed(1);
+      const kelembabanFormatted = parseInt(latestData.humidity);
+      const gasFormatted = Number(latestData.gas_ppm).toFixed(1);
 
-      const replyMsg = `Update Terakhir (${device.device_name}):\n\n🌡️ Suhu: ${latestData.temperature}°C\n💧 Lembap: ${latestData.humidity}%\n💨 Gas Amonia: ${latestData.gas_ppm} PPM\n\n🕒 Waktu: ${timeString} WIB`;
+      // B. Tentukan Pesan Status Berdasarkan Threshold
+      let statusMessage =
+        "Kandang anda sedang berada dalam kondisi yang optimal.";
+
+      // Bandingkan data aktual dengan threshold
+      if (
+        Number(latestData.temperature) > Number(device.threshold_temp) ||
+        Number(latestData.gas_ppm) > Number(device.threshold_gas)
+      ) {
+        statusMessage =
+          "⚠️ PERINGATAN: Kondisi kandang saat ini melewati batas aman. Harap segera dilakukan pengecekan.";
+      }
+
+      // C. Buat Pesan Balasan Sesuai Format Gambar
+      const replyMsg = `Berikut kondisi kandang anda saat ini\n\n• Suhu — ${suhuFormatted} Derajat Celcius\n• Kelembaban— ${kelembabanFormatted}%\n• Gas NH3 — ${gasFormatted} ppm\n\n${statusMessage}`;
 
       await sendWhatsApp(fromNumber, replyMsg);
     } catch (err) {
@@ -178,35 +184,32 @@ app.post("/whatsapp-webhook", async (req, res) => {
     }
   }
 
-  res.status(200).send(); // Wajib membalas 200 OK ke Twilio
+  res.status(200).send();
 });
 
 // ========================================================
 // --- 5. LOGIKA API (FLUTTER APP -> SERVER) ---
 // ========================================================
 
-// Root Endpoint (Tes koneksi)
+// Root Endpoint
 app.get("/", (req, res) => {
   res.send("🚀 Backend Smart Kandang Maggenzim is RUNNING!");
 });
 
-// API: Validasi Perangkat (Cek apakah ID ada di DB)
+// API: Validasi Perangkat
 app.get("/api/check-device", async (req, res) => {
   try {
     const { id } = req.query;
     if (!id)
       return res.status(400).json({ error: "Parameter ?id= diperlukan" });
-
     const result = await pool.query(
-      "SELECT device_id, device_name FROM devices WHERE device_id = $1",
+      "SELECT device_id, device_name, threshold_temp, threshold_gas FROM devices WHERE device_id = $1",
       [id]
     );
 
     if (result.rows.length > 0) {
-      // Perangkat ditemukan
       res.status(200).json({ status: "success", device: result.rows[0] });
     } else {
-      // Perangkat tidak ditemukan
       res.status(404).json({ status: "error", message: "Device not found" });
     }
   } catch (err) {
@@ -227,7 +230,7 @@ app.get("/api/sensor-data", async (req, res) => {
       "SELECT timestamp, temperature, humidity, gas_ppm AS amonia FROM sensor_data WHERE device_id = $1 ORDER BY timestamp DESC LIMIT 20",
       [id]
     );
-    res.json(result.rows); // Kirim list data ke Flutter
+    res.json(result.rows);
   } catch (err) {
     console.error("❌ Error di /api/sensor-data:", err);
     res.status(500).json({ error: "Database error" });
@@ -247,9 +250,9 @@ app.get("/api/schedule", async (req, res) => {
     );
 
     if (result.rows.length > 0) {
-      res.json(result.rows[0]); // Kirim: { "times": ["08:00", ...] }
+      res.json(result.rows[0]);
     } else {
-      res.json({ times: [] }); // Belum ada jadwal, kirim array kosong
+      res.json({ times: [] });
     }
   } catch (err) {
     console.error("❌ Error di /api/schedule (GET):", err);
@@ -260,15 +263,14 @@ app.get("/api/schedule", async (req, res) => {
 // API: Simpan/Update Jadwal Pakan
 app.post("/api/schedule", async (req, res) => {
   try {
-    const { id } = req.query; // ID perangkat dari URL
-    const newSchedule = req.body; // Data dari Flutter: { "times": ["08:00", ...] }
+    const { id } = req.query;
+    const newSchedule = req.body;
 
     if (!id || !newSchedule || !newSchedule.times) {
       return res.status(400).json({ error: "Data jadwal tidak lengkap" });
     }
 
     // 1. Simpan/Update ke Database (UPSERT)
-    // Menggunakan ON CONFLICT agar jika ID sudah ada, datanya di-update
     const query = `
       INSERT INTO schedules (device_id, times) VALUES ($1, $2)
       ON CONFLICT (device_id) DO UPDATE SET times = $2, updated_at = NOW()
@@ -276,7 +278,6 @@ app.post("/api/schedule", async (req, res) => {
     await pool.query(query, [id, JSON.stringify(newSchedule.times)]);
 
     // 2. Kirim perintah Real-time ke Alat Pakan via MQTT
-    // Topik command khusus untuk perangkat tersebut
     const commandTopic = `devices/${id}/commands/set_schedule`;
     mqttClient.publish(commandTopic, JSON.stringify(newSchedule));
     console.log(`📤 Perintah update jadwal dikirim ke ${commandTopic}`);
@@ -300,8 +301,8 @@ async function sendWhatsApp(to, message) {
   try {
     await twilioClient.messages.create({
       body: message,
-      from: process.env.TWILIO_WHATSAPP_NUMBER, // Nomor Sandbox Twilio
-      to: to, // Nomor tujuan (format whatsapp:+62...)
+      from: process.env.TWILIO_WHATSAPP_NUMBER,
+      to: to,
     });
     console.log(`✅ Pesan WA terkirim ke ${to}`);
   } catch (err) {
