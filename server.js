@@ -85,6 +85,19 @@ mqttClient.on("message", async (topic, message) => {
         `📥 [DATA] ${deviceId}: Suhu=${data.temperature}, Gas=${gasValue}`
       );
 
+      // --- [PERBAIKAN DIMULAI DISINI] ---
+      // Langkah A: Pastikan Device sudah ada di tabel 'devices' sebelum insert data
+      // Kita lakukan "Insert if not exists"
+      const ensureDeviceQuery = `
+          INSERT INTO devices (device_id, device_name, type, whatsapp_number)
+          VALUES ($1, $2, 'sensor', '')
+          ON CONFLICT (device_id) DO NOTHING
+      `;
+      // Kita beri nama default "Perangkat [ID]"
+      await pool.query(ensureDeviceQuery, [deviceId, `Perangkat ${deviceId}`]);
+      // --- [PERBAIKAN SELESAI] ---
+
+      // Langkah B: Baru simpan data sensor (Sekarang aman karena parent pasti ada)
       await pool.query(
         "INSERT INTO sensor_data(device_id, temperature, humidity, gas_ppm) VALUES($1, $2, $3, $4)",
         [deviceId, data.temperature, data.humidity, gasValue]
