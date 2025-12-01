@@ -1,6 +1,6 @@
 // ========================================================
-// Bismillah - Backend Smart Kandang Maggenzim (Final v4)
-// Fitur: User Auth, Device Claiming, Auto-Register, Alerts
+// Bismillah - Backend Smart Kandang Maggenzim (Final v5)
+// Fitur: User Auth, Device Claim/Release, Auto-Register, Alerts
 // ========================================================
 
 require("dotenv").config();
@@ -202,7 +202,38 @@ app.post("/api/claim-device", async (req, res) => {
   }
 });
 
-// --- C. CEK DEVICE (Dashboard) ---
+// --- C. RELEASE PERANGKAT (HAPUS) ---
+app.post("/api/release-device", async (req, res) => {
+  try {
+    const { device_id, user_id } = req.body;
+
+    if (!device_id || !user_id) {
+      return res.status(400).json({ error: "Data tidak lengkap" });
+    }
+
+    // Hanya hapus jika owned_by cocok dengan user yg request
+    const result = await pool.query(
+      "UPDATE devices SET owned_by = NULL, whatsapp_number = '' WHERE device_id = $1 AND owned_by = $2",
+      [device_id, user_id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(403).json({
+        status: "error",
+        message:
+          "Gagal menghapus. Anda bukan pemilik atau alat tidak ditemukan.",
+      });
+    }
+
+    console.log(`🗑️ Device ${device_id} dilepas oleh User ${user_id}`);
+    res.json({ status: "success", message: "Perangkat berhasil dihapus." });
+  } catch (err) {
+    console.error("❌ Release Error:", err);
+    res.status(500).json({ error: "Server Error" });
+  }
+});
+
+// --- D. CEK DEVICE (Dashboard) ---
 app.get("/api/check-device", async (req, res) => {
   try {
     const { id } = req.query;
@@ -218,7 +249,7 @@ app.get("/api/check-device", async (req, res) => {
   }
 });
 
-// --- D. DATA SENSOR ---
+// --- E. DATA SENSOR ---
 app.get("/api/sensor-data", async (req, res) => {
   try {
     const { id } = req.query;
@@ -232,7 +263,7 @@ app.get("/api/sensor-data", async (req, res) => {
   }
 });
 
-// --- E. GET JADWAL ---
+// --- F. GET JADWAL ---
 app.get("/api/schedule", async (req, res) => {
   try {
     const { id } = req.query;
@@ -247,7 +278,7 @@ app.get("/api/schedule", async (req, res) => {
   }
 });
 
-// --- F. UPDATE JADWAL (MQTT Retain) ---
+// --- G. UPDATE JADWAL (MQTT Retain) ---
 app.post("/api/schedule", async (req, res) => {
   try {
     const { id } = req.query;
@@ -263,7 +294,7 @@ app.post("/api/schedule", async (req, res) => {
     mqttClient.publish(
       `devices/${id}/commands/set_schedule`,
       JSON.stringify(newSchedule),
-      { retain: true } // <--- KUNCI AGAR DATA TIDAK HILANG
+      { retain: true }
     );
 
     res.json({ status: "success" });
@@ -272,14 +303,13 @@ app.post("/api/schedule", async (req, res) => {
   }
 });
 
-// --- G. WEBHOOK WHATSAPP ---
+// --- H. WEBHOOK WHATSAPP ---
 app.post("/whatsapp-webhook", async (req, res) => {
   const incomingMsg = req.body.Body.toLowerCase().trim();
   const fromNumber = req.body.From;
 
   if (incomingMsg === "cek") {
     try {
-      // Cari device berdasarkan nomor WA (karena sudah diklaim)
       const deviceRes = await pool.query(
         "SELECT * FROM devices WHERE whatsapp_number = $1 LIMIT 1",
         [fromNumber]
@@ -314,7 +344,6 @@ app.post("/whatsapp-webhook", async (req, res) => {
   res.status(200).send();
 });
 
-// Helper Kirim WA
 async function sendWhatsApp(to, message) {
   try {
     await twilioClient.messages.create({
