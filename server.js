@@ -1,5 +1,6 @@
 // ========================================================
-// Bismillah - Backend Smart Kandang Maggenzim (Production)
+// Bismillah - Backend Smart Kandang Maggenzim (Final v4)
+// Fitur: User Auth, Device Claiming, Auto-Register, Alerts
 // ========================================================
 
 require("dotenv").config();
@@ -16,19 +17,19 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Database
+// Koneksi Database (Neon PostgreSQL)
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
 });
 
-// Twilio
+// Klien Twilio (WhatsApp)
 const twilioClient = twilio(
   process.env.TWILIO_ACCOUNT_SID,
   process.env.TWILIO_AUTH_TOKEN
 );
 
-// MQTT Client
+// Klien MQTT (HiveMQ Cloud)
 const mqttClient = mqtt.connect(process.env.MQTT_BROKER_URL, {
   username: process.env.MQTT_USERNAME,
   password: process.env.MQTT_PASSWORD,
@@ -36,11 +37,12 @@ const mqttClient = mqtt.connect(process.env.MQTT_BROKER_URL, {
   port: 8883,
 });
 
-// --- LOGIKA MQTT ---
+// ========================================================
+// --- 1. LOGIKA MQTT (LISTENER) ---
+// ========================================================
 mqttClient.on("connect", () => {
   console.log("✅ Terhubung ke HiveMQ Broker!");
-
-  // Subscribe hanya ke Data Sensor dan Registrasi Alat
+  // Subscribe ke Data Sensor dan Registrasi Alat
   mqttClient.subscribe(["devices/+/data", "devices/+/register"], (err) => {
     if (err) console.error("❌ Gagal subscribe:", err);
     else console.log("📡 Listening: Data & Register...");
@@ -53,16 +55,19 @@ mqttClient.on("message", async (topic, message) => {
     const deviceId = topicParts[1];
     const action = topicParts[2];
 
-    // 1. LOGIKA AUTO REGISTER
+    // --- A. LOGIKA AUTO REGISTER (Saat Alat Nyala) ---
     if (action === "register") {
       const info = JSON.parse(message.toString());
-      console.log(`🆕 [REGISTER] ${deviceId}`);
+      console.log(`🆕 [REGISTER] Sinyal dari ${deviceId}`);
 
+      // Masukkan ke database jika belum ada.
+      // Kolom 'owned_by' dan 'whatsapp_number' dibiarkan NULL/Kosong dulu
+      // sampai User mengklaimnya lewat Aplikasi.
       const query = `
-            INSERT INTO devices (device_id, device_name, type, whatsapp_number)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (device_id) DO NOTHING
-        `;
+          INSERT INTO devices (device_id, device_name, type, whatsapp_number)
+          VALUES ($1, $2, $3, $4)
+          ON CONFLICT (device_id) DO NOTHING
+      `;
 
       await pool.query(query, [
         deviceId,
@@ -73,7 +78,7 @@ mqttClient.on("message", async (topic, message) => {
       return;
     }
 
-    // 2. LOGIKA DATA SENSOR
+    // --- B. LOGIKA DATA SENSOR ---
     if (action === "data") {
       let rawData = JSON.parse(message.toString());
       let data = Array.isArray(rawData) ? rawData[0] : rawData;
@@ -84,21 +89,14 @@ mqttClient.on("message", async (topic, message) => {
       console.log(
         `📥 [DATA] ${deviceId}: Suhu=${data.temperature}, Gas=${gasValue}`
       );
-      const ensureDeviceQuery = `
-          INSERT INTO devices (device_id, device_name, type, whatsapp_number)
-          VALUES ($1, $2, 'sensor', '')
-          ON CONFLICT (device_id) DO NOTHING
-      `;
-      // Kita beri nama default "Perangkat [ID]"
-      await pool.query(ensureDeviceQuery, [deviceId, `Perangkat ${deviceId}`]);
 
-      // Langkah B: Baru simpan data sensor (Sekarang aman karena parent pasti ada)
+      // 1. Simpan Riwayat
       await pool.query(
         "INSERT INTO sensor_data(device_id, temperature, humidity, gas_ppm) VALUES($1, $2, $3, $4)",
         [deviceId, data.temperature, data.humidity, gasValue]
       );
 
-      // Cek Threshold & Kirim WA
+      // 2. Cek Alert & Kepemilikan
       const deviceRes = await pool.query(
         "SELECT * FROM devices WHERE device_id = $1",
         [deviceId]
@@ -108,12 +106,14 @@ mqttClient.on("message", async (topic, message) => {
       const device = deviceRes.rows[0];
       let alertMessage = "";
 
+      // Logika Threshold
       if (Number(data.temperature) > Number(device.threshold_temp)) {
         alertMessage = `⚠️ PERINGATAN! Suhu di ${device.device_name} tinggi: ${data.temperature}°C.`;
       } else if (Number(gasValue) > Number(device.threshold_gas)) {
         alertMessage = `⚠️ PERINGATAN! Gas di ${device.device_name} tinggi: ${gasValue} PPM.`;
       }
 
+      // Kirim WA HANYA jika device sudah diklaim (ada nomor WA)
       if (
         alertMessage &&
         device.whatsapp_number &&
@@ -127,53 +127,87 @@ mqttClient.on("message", async (topic, message) => {
   }
 });
 
-// --- API ROUTES ---
-app.post("/whatsapp-webhook", async (req, res) => {
-  const incomingMsg = req.body.Body.toLowerCase().trim();
-  const fromNumber = req.body.From;
+// ========================================================
+// --- 2. API ENDPOINTS (FLUTTER) ---
+// ========================================================
 
-  if (incomingMsg === "cek") {
-    try {
-      const deviceRes = await pool.query(
-        "SELECT * FROM devices WHERE whatsapp_number = $1 LIMIT 1",
-        [fromNumber]
-      );
-      if (deviceRes.rows.length === 0) {
-        await sendWhatsApp(fromNumber, "Nomor Anda belum terdaftar.");
-        return res.status(200).send();
-      }
-      const device = deviceRes.rows[0];
+app.get("/", (req, res) => res.send("🚀 Backend Maggenzim Running!"));
 
-      const dataRes = await pool.query(
-        "SELECT * FROM sensor_data WHERE device_id = $1 ORDER BY timestamp DESC LIMIT 1",
-        [device.device_id]
-      );
+// --- A. REGISTRASI USER (LOGIN) ---
+app.post("/api/register", async (req, res) => {
+  try {
+    const { name, phone } = req.body;
+    if (!name || !phone)
+      return res.status(400).json({ error: "Data tidak lengkap" });
 
-      if (dataRes.rows.length === 0) {
-        await sendWhatsApp(fromNumber, "Belum ada data sensor.");
-        return res.status(200).send();
-      }
+    // UPSERT User (Update nama jika no hp sudah ada)
+    const query = `
+      INSERT INTO users (full_name, phone_number) VALUES ($1, $2)
+      ON CONFLICT (phone_number) DO UPDATE SET full_name = EXCLUDED.full_name
+      RETURNING user_id, full_name, phone_number;
+    `;
+    const result = await pool.query(query, [name, phone]);
 
-      const latestData = dataRes.rows[0];
-      const replyMsg = `*${device.device_name}*\nSuhu: ${Number(
-        latestData.temperature
-      ).toFixed(1)}°C\nAmonia: ${Number(latestData.gas_ppm).toFixed(1)} PPM`;
-
-      await sendWhatsApp(fromNumber, replyMsg);
-    } catch (err) {
-      console.error(err);
-    }
+    res.json({ status: "success", user: result.rows[0] });
+  } catch (err) {
+    console.error("❌ Register Error:", err);
+    res.status(500).json({ error: "Server Error" });
   }
-  res.status(200).send();
 });
 
-app.get("/", (req, res) => res.send("🚀 Backend Production Running!"));
+// --- B. KLAIM PERANGKAT (PROVISIONING) ---
+app.post("/api/claim-device", async (req, res) => {
+  try {
+    const { device_id, user_id, user_phone } = req.body;
 
+    // 1. Cek apakah alat ada di DB (Sudah Auto-Register?)
+    const check = await pool.query(
+      "SELECT * FROM devices WHERE device_id = $1",
+      [device_id]
+    );
+    if (check.rows.length === 0) {
+      return res
+        .status(404)
+        .json({
+          status: "error",
+          message: "Perangkat tidak ditemukan/belum dinyalakan.",
+        });
+    }
+    const device = check.rows[0];
+
+    // 2. Cek Kepemilikan (Cegah pencurian ID)
+    if (device.owned_by !== null && device.owned_by != user_id) {
+      return res
+        .status(403)
+        .json({
+          status: "error",
+          message: "Perangkat ini sudah dimiliki orang lain!",
+        });
+    }
+
+    // 3. Update Kepemilikan
+    await pool.query(
+      "UPDATE devices SET owned_by = $1, whatsapp_number = $2 WHERE device_id = $3",
+      [user_id, user_phone, device_id]
+    );
+
+    res.json({
+      status: "success",
+      message: "Perangkat berhasil diklaim.",
+      type: device.type,
+    });
+  } catch (err) {
+    console.error("❌ Claim Error:", err);
+    res.status(500).json({ error: "Server Error" });
+  }
+});
+
+// --- C. CEK DEVICE (Dashboard) ---
 app.get("/api/check-device", async (req, res) => {
   try {
     const { id } = req.query;
     const result = await pool.query(
-      "SELECT device_id, device_name, threshold_temp, threshold_gas FROM devices WHERE device_id = $1",
+      "SELECT * FROM devices WHERE device_id = $1",
       [id]
     );
     if (result.rows.length > 0)
@@ -184,6 +218,7 @@ app.get("/api/check-device", async (req, res) => {
   }
 });
 
+// --- D. DATA SENSOR ---
 app.get("/api/sensor-data", async (req, res) => {
   try {
     const { id } = req.query;
@@ -197,6 +232,7 @@ app.get("/api/sensor-data", async (req, res) => {
   }
 });
 
+// --- E. GET JADWAL ---
 app.get("/api/schedule", async (req, res) => {
   try {
     const { id } = req.query;
@@ -211,24 +247,74 @@ app.get("/api/schedule", async (req, res) => {
   }
 });
 
+// --- F. UPDATE JADWAL (MQTT Retain) ---
 app.post("/api/schedule", async (req, res) => {
   try {
     const { id } = req.query;
     const newSchedule = req.body;
+
+    // Simpan DB
     await pool.query(
       `INSERT INTO schedules (device_id, times) VALUES ($1, $2) ON CONFLICT (device_id) DO UPDATE SET times = $2, updated_at = NOW()`,
       [id, JSON.stringify(newSchedule.times)]
     );
+
+    // Kirim MQTT dengan RETAIN: true agar alat menerima meski baru nyala
     mqttClient.publish(
       `devices/${id}/commands/set_schedule`,
-      JSON.stringify(newSchedule)
+      JSON.stringify(newSchedule),
+      { retain: true } // <--- KUNCI AGAR DATA TIDAK HILANG
     );
+
     res.json({ status: "success" });
   } catch (err) {
     res.status(500).json({ error: "Server error" });
   }
 });
 
+// --- G. WEBHOOK WHATSAPP ---
+app.post("/whatsapp-webhook", async (req, res) => {
+  const incomingMsg = req.body.Body.toLowerCase().trim();
+  const fromNumber = req.body.From;
+
+  if (incomingMsg === "cek") {
+    try {
+      // Cari device berdasarkan nomor WA (karena sudah diklaim)
+      const deviceRes = await pool.query(
+        "SELECT * FROM devices WHERE whatsapp_number = $1 LIMIT 1",
+        [fromNumber]
+      );
+      if (deviceRes.rows.length === 0) {
+        await sendWhatsApp(
+          fromNumber,
+          "Nomor Anda belum terdaftar di perangkat manapun."
+        );
+        return res.status(200).send();
+      }
+      const device = deviceRes.rows[0];
+
+      const dataRes = await pool.query(
+        "SELECT * FROM sensor_data WHERE device_id = $1 ORDER BY timestamp DESC LIMIT 1",
+        [device.device_id]
+      );
+      if (dataRes.rows.length === 0) {
+        await sendWhatsApp(fromNumber, "Belum ada data sensor.");
+        return res.status(200).send();
+      }
+
+      const d = dataRes.rows[0];
+      const reply = `*${device.device_name}*\nSuhu: ${Number(
+        d.temperature
+      ).toFixed(1)}°C\nAmonia: ${Number(d.gas_ppm).toFixed(1)} PPM`;
+      await sendWhatsApp(fromNumber, reply);
+    } catch (err) {
+      console.error(err);
+    }
+  }
+  res.status(200).send();
+});
+
+// Helper Kirim WA
 async function sendWhatsApp(to, message) {
   try {
     await twilioClient.messages.create({
@@ -237,7 +323,7 @@ async function sendWhatsApp(to, message) {
       to: to,
     });
   } catch (err) {
-    console.error(err);
+    console.error("Twilio Error:", err.message);
   }
 }
 
