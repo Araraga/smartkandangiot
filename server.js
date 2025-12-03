@@ -1,6 +1,7 @@
 // ========================================================
-// Bismillah - Backend Smart Kandang Maggenzim (Final v5.1)
+// Bismillah - Backend Smart Kandang Maggenzim (Final v5.2)
 // Fitur: Auth, Claim/Release, Auto-Register, Alerts
+// Perbaikan: Auto-Provisioning on Data
 // ========================================================
 
 require("dotenv").config();
@@ -86,6 +87,15 @@ mqttClient.on("message", async (topic, message) => {
         `📥 [DATA] ${deviceId}: Suhu=${data.temperature}, Gas=${gasValue}`
       );
 
+      // [PERBAIKAN PENTING] Pastikan Device Ada Dulu (Auto-Provisioning)
+      // Ini mencegah error Foreign Key jika register gagal/telat
+      const ensureDeviceQuery = `
+          INSERT INTO devices (device_id, device_name, type, whatsapp_number)
+          VALUES ($1, $2, 'sensor', '')
+          ON CONFLICT (device_id) DO NOTHING
+      `;
+      await pool.query(ensureDeviceQuery, [deviceId, `Perangkat ${deviceId}`]);
+
       // Simpan Riwayat
       await pool.query(
         "INSERT INTO sensor_data(device_id, temperature, humidity, gas_ppm) VALUES($1, $2, $3, $4)",
@@ -144,6 +154,31 @@ app.post("/api/register", async (req, res) => {
     res.json({ status: "success", user: result.rows[0] });
   } catch (err) {
     console.error("❌ Register Error:", err);
+    res.status(500).json({ error: "Server Error" });
+  }
+});
+
+// --- A2. LOGIN USER (CEK NOMOR HP) ---
+app.post("/api/login", async (req, res) => {
+  try {
+    const { phone } = req.body;
+    if (!phone)
+      return res.status(400).json({ error: "Nomor telepon wajib diisi" });
+
+    const result = await pool.query(
+      "SELECT * FROM users WHERE phone_number = $1",
+      [phone]
+    );
+
+    if (result.rows.length > 0) {
+      res.json({ status: "success", user: result.rows[0] });
+    } else {
+      res
+        .status(404)
+        .json({ status: "error", message: "Nomor belum terdaftar." });
+    }
+  } catch (err) {
+    console.error("❌ Login Error:", err);
     res.status(500).json({ error: "Server Error" });
   }
 });
