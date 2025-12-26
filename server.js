@@ -1,36 +1,24 @@
-// ========================================================
-// Bismillah - Backend Smart Kandang Maggenzim (Final v5.2)
-// Fitur: Auth, Claim/Release, Auto-Register, Alerts
-// Perbaikan: Auto-Provisioning on Data
-// ========================================================
-
 require("dotenv").config();
 const express = require("express");
 const mqtt = require("mqtt");
-const { Pool } = require("pg");
 const twilio = require("twilio");
 const cors = require("cors");
 
+// --- 1. IMPORT KONFIGURASI BARU ---
+const pool = require("./config/db"); // Menggunakan file db.js
+const aiController = require("./controllers/ai_controller"); // Import Controller AI
+
 const app = express();
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Database Connection
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-});
-
-// Twilio Client
 const twilioClient = twilio(
   process.env.TWILIO_ACCOUNT_SID,
   process.env.TWILIO_AUTH_TOKEN
 );
 
-// MQTT Client (HiveMQ)
 const mqttClient = mqtt.connect(process.env.MQTT_BROKER_URL, {
   username: process.env.MQTT_USERNAME,
   password: process.env.MQTT_PASSWORD,
@@ -38,9 +26,6 @@ const mqttClient = mqtt.connect(process.env.MQTT_BROKER_URL, {
   port: 8883,
 });
 
-// ========================================================
-// --- 1. LOGIKA MQTT (LISTENER) ---
-// ========================================================
 mqttClient.on("connect", () => {
   console.log("✅ Terhubung ke HiveMQ Broker!");
   mqttClient.subscribe(["devices/+/data", "devices/+/register"], (err) => {
@@ -55,12 +40,9 @@ mqttClient.on("message", async (topic, message) => {
     const deviceId = topicParts[1];
     const action = topicParts[2];
 
-    // --- A. AUTO REGISTER (Saat Alat Nyala) ---
     if (action === "register") {
       const info = JSON.parse(message.toString());
       console.log(`🆕 [REGISTER] Sinyal dari ${deviceId}`);
-
-      // Masukkan ke DB (Biarkan owned_by NULL)
       const query = `
           INSERT INTO devices (device_id, device_name, type, whatsapp_number)
           VALUES ($1, $2, $3, $4)
@@ -70,12 +52,11 @@ mqttClient.on("message", async (topic, message) => {
         deviceId,
         info.device_name || `Perangkat ${deviceId}`,
         info.type || "unknown",
-        "", // WA Kosong
+        "",
       ]);
       return;
     }
 
-    // --- B. DATA SENSOR ---
     if (action === "data") {
       let rawData = JSON.parse(message.toString());
       let data = Array.isArray(rawData) ? rawData[0] : rawData;
@@ -87,8 +68,6 @@ mqttClient.on("message", async (topic, message) => {
         `📥 [DATA] ${deviceId}: Suhu=${data.temperature}, Gas=${gasValue}`
       );
 
-      // [PERBAIKAN PENTING] Pastikan Device Ada Dulu (Auto-Provisioning)
-      // Ini mencegah error Foreign Key jika register gagal/telat
       const ensureDeviceQuery = `
           INSERT INTO devices (device_id, device_name, type, whatsapp_number)
           VALUES ($1, $2, 'sensor', '')
@@ -96,13 +75,11 @@ mqttClient.on("message", async (topic, message) => {
       `;
       await pool.query(ensureDeviceQuery, [deviceId, `Perangkat ${deviceId}`]);
 
-      // Simpan Riwayat
       await pool.query(
         "INSERT INTO sensor_data(device_id, temperature, humidity, gas_ppm) VALUES($1, $2, $3, $4)",
         [deviceId, data.temperature, data.humidity, gasValue]
       );
 
-      // Cek Alert (Hanya jika ada pemilik)
       const deviceRes = await pool.query(
         "SELECT * FROM devices WHERE device_id = $1",
         [deviceId]
@@ -131,19 +108,16 @@ mqttClient.on("message", async (topic, message) => {
   }
 });
 
-// ========================================================
-// --- 2. API ENDPOINTS (FLUTTER) ---
-// ========================================================
-
 app.get("/", (req, res) => res.send("🚀 Backend Maggenzim Running!"));
 
-// --- A. REGISTRASI USER ---
+// --- 2. ROUTE BARU: CHAT AI ---
+app.post("/api/chat", aiController.chatWithAssistant);
+// ------------------------------
+
 app.post("/api/register", async (req, res) => {
   try {
     const { name, phone } = req.body;
     if (!name || !phone) return res.status(400).json({ error: "Data kurang" });
-
-    // UPSERT (Buat baru atau Update nama jika HP sama)
     const query = `
       INSERT INTO users (full_name, phone_number) VALUES ($1, $2)
       ON CONFLICT (phone_number) DO UPDATE SET full_name = EXCLUDED.full_name
@@ -158,7 +132,6 @@ app.post("/api/register", async (req, res) => {
   }
 });
 
-// --- A2. LOGIN USER (CEK NOMOR HP) ---
 app.post("/api/login", async (req, res) => {
   try {
     const { phone } = req.body;
@@ -183,37 +156,29 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
-// --- B. KLAIM PERANGKAT (PROVISIONING) ---
 app.post("/api/claim-device", async (req, res) => {
   try {
     const { device_id, user_id, user_phone } = req.body;
 
-    // 1. Cek Alat
     const check = await pool.query(
       "SELECT * FROM devices WHERE device_id = $1",
       [device_id]
     );
     if (check.rows.length === 0) {
-      return res
-        .status(404)
-        .json({
-          status: "error",
-          message: "Perangkat belum dinyalakan/terdaftar.",
-        });
+      return res.status(404).json({
+        status: "error",
+        message: "Perangkat belum dinyalakan/terdaftar.",
+      });
     }
     const device = check.rows[0];
 
-    // 2. Cek Kepemilikan (Security Check)
     if (device.owned_by !== null && device.owned_by != user_id) {
-      return res
-        .status(403)
-        .json({
-          status: "error",
-          message: "Perangkat sudah dimiliki orang lain!",
-        });
+      return res.status(403).json({
+        status: "error",
+        message: "Perangkat sudah dimiliki orang lain!",
+      });
     }
 
-    // 3. Klaim (Update Owner)
     await pool.query(
       "UPDATE devices SET owned_by = $1, whatsapp_number = $2 WHERE device_id = $3",
       [user_id, user_phone, device_id]
@@ -230,24 +195,19 @@ app.post("/api/claim-device", async (req, res) => {
   }
 });
 
-// --- C. RELEASE PERANGKAT (HAPUS KEPEMILIKAN) ---
 app.post("/api/release-device", async (req, res) => {
   try {
     const { device_id, user_id } = req.body;
-
-    // Reset owned_by jadi NULL hanya jika usernya cocok
     const result = await pool.query(
       "UPDATE devices SET owned_by = NULL, whatsapp_number = '' WHERE device_id = $1 AND owned_by = $2",
       [device_id, user_id]
     );
 
     if (result.rowCount === 0) {
-      return res
-        .status(403)
-        .json({
-          status: "error",
-          message: "Gagal hapus. Anda bukan pemilik sah.",
-        });
+      return res.status(403).json({
+        status: "error",
+        message: "Gagal hapus. Anda bukan pemilik sah.",
+      });
     }
 
     console.log(`🗑️ Device ${device_id} dilepas User ${user_id}`);
@@ -258,7 +218,6 @@ app.post("/api/release-device", async (req, res) => {
   }
 });
 
-// --- D. DATA SENSOR ---
 app.get("/api/sensor-data", async (req, res) => {
   try {
     const { id } = req.query;
@@ -272,7 +231,6 @@ app.get("/api/sensor-data", async (req, res) => {
   }
 });
 
-// --- E. GET JADWAL ---
 app.get("/api/schedule", async (req, res) => {
   try {
     const { id } = req.query;
@@ -287,19 +245,15 @@ app.get("/api/schedule", async (req, res) => {
   }
 });
 
-// --- F. UPDATE JADWAL (MQTT Retain) ---
 app.post("/api/schedule", async (req, res) => {
   try {
     const { id } = req.query;
     const newSchedule = req.body;
-
-    // DB Save
     await pool.query(
       `INSERT INTO schedules (device_id, times) VALUES ($1, $2) ON CONFLICT (device_id) DO UPDATE SET times = $2, updated_at = NOW()`,
       [id, JSON.stringify(newSchedule.times)]
     );
 
-    // MQTT Publish (Retain: true agar alat menerima walau baru nyala)
     mqttClient.publish(
       `devices/${id}/commands/set_schedule`,
       JSON.stringify(newSchedule),
@@ -312,7 +266,6 @@ app.post("/api/schedule", async (req, res) => {
   }
 });
 
-// --- G. CEK DEVICE (Legacy/Dashboard Check) ---
 app.get("/api/check-device", async (req, res) => {
   try {
     const { id } = req.query;
@@ -328,7 +281,6 @@ app.get("/api/check-device", async (req, res) => {
   }
 });
 
-// --- H. WHATSAPP WEBHOOK ---
 app.post("/whatsapp-webhook", async (req, res) => {
   const incomingMsg = req.body.Body.toLowerCase().trim();
   const fromNumber = req.body.From;
