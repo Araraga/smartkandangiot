@@ -33,7 +33,6 @@ exports.chatWithAssistant = async (req, res) => {
       }
     }
 
-    // Susun Prompt
     const prompt = `
       Anda adalah asisten cerdas sistem "IoTernak" (Monitoring Kandang Ayam).
       

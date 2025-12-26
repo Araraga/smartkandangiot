@@ -4,9 +4,8 @@ const mqtt = require("mqtt");
 const twilio = require("twilio");
 const cors = require("cors");
 
-// --- 1. IMPORT KONFIGURASI BARU ---
-const pool = require("./config/db"); // Menggunakan file db.js
-const aiController = require("./controllers/ai_controller"); // Import Controller AI
+const pool = require("./config/db");
+const aiController = require("./controllers/ai_controller");
 
 const app = express();
 
@@ -110,9 +109,7 @@ mqttClient.on("message", async (topic, message) => {
 
 app.get("/", (req, res) => res.send("🚀 Backend Maggenzim Running!"));
 
-// --- 2. ROUTE BARU: CHAT AI ---
 app.post("/api/chat", aiController.chatWithAssistant);
-// ------------------------------
 
 app.post("/api/register", async (req, res) => {
   try {
