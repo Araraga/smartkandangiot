@@ -7,7 +7,6 @@ const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 exports.chatWithAssistant = async (req, res) => {
   const { message, device_id } = req.body;
 
-  // PERBAIKAN 1: Validasi hanya mewajibkan 'message'. 'device_id' boleh kosong.
   if (!message) {
     return res.status(400).json({
       status: "error",
@@ -18,7 +17,6 @@ exports.chatWithAssistant = async (req, res) => {
   try {
     let sensorContext = "Data sensor tidak dilampirkan (Pertanyaan Umum).";
 
-    // PERBAIKAN 2: Hanya ambil data sensor jika device_id ada & tidak kosong
     if (device_id && device_id.trim() !== "") {
       const sensorQuery = `
         SELECT temperature, humidity, gas_ppm, timestamp 
