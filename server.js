@@ -109,8 +109,10 @@ mqttClient.on("message", async (topic, message) => {
 
 app.get("/", (req, res) => res.send("🚀 Backend Maggenzim Running!"));
 
+// --- AI Chat Route ---
 app.post("/api/chat", aiController.chatWithAssistant);
 
+// --- Auth Routes ---
 app.post("/api/register", async (req, res) => {
   try {
     const { name, phone } = req.body;
@@ -149,6 +151,35 @@ app.post("/api/login", async (req, res) => {
     }
   } catch (err) {
     console.error("❌ Login Error:", err);
+    res.status(500).json({ error: "Server Error" });
+  }
+});
+
+// --- Device Management Routes ---
+
+// [BARU] Endpoint untuk mengambil semua device milik user (Sync saat login)
+app.get("/api/my-devices", async (req, res) => {
+  try {
+    const { user_id } = req.query;
+    if (!user_id) {
+      return res
+        .status(400)
+        .json({ status: "error", message: "User ID diperlukan" });
+    }
+
+    const query = `
+      SELECT * FROM devices 
+      WHERE owned_by = $1 
+      ORDER BY device_name ASC
+    `;
+    const result = await pool.query(query, [user_id]);
+
+    res.json({
+      status: "success",
+      data: result.rows,
+    });
+  } catch (err) {
+    console.error("Error My Devices:", err);
     res.status(500).json({ error: "Server Error" });
   }
 });
@@ -278,6 +309,7 @@ app.get("/api/check-device", async (req, res) => {
   }
 });
 
+// --- Webhooks ---
 app.post("/whatsapp-webhook", async (req, res) => {
   const incomingMsg = req.body.Body.toLowerCase().trim();
   const fromNumber = req.body.From;
