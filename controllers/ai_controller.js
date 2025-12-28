@@ -3,7 +3,7 @@ const pool = require("../config/db");
 
 // Inisialisasi Gemini
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-001" });
+const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
 exports.chatWithAssistant = async (req, res) => {
   const { message, device_id, user_id } = req.body;
