@@ -1,7 +1,6 @@
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const pool = require("../config/db");
 
-// Inisialisasi Gemini
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
@@ -17,7 +16,6 @@ exports.chatWithAssistant = async (req, res) => {
   try {
     let sensorContext = "Tidak ada data sensor yang terlampir.";
 
-    // --- Ambil Data Sensor (Logic sama seperti sebelumnya) ---
     if (device_id && device_id.trim() !== "") {
       const sensorQuery = `
         SELECT temperature, humidity, gas_ppm, timestamp 
@@ -58,7 +56,6 @@ exports.chatWithAssistant = async (req, res) => {
       }
     }
 
-    // --- PROMPT BARU (ANTI BOLD & SINGKAT) ---
     const prompt = `
       Anda adalah asisten sistem "IoTernak".
       
@@ -81,7 +78,7 @@ exports.chatWithAssistant = async (req, res) => {
 
     res.json({
       status: "success",
-      reply: response.text(), // Mengirim teks polos
+      reply: response.text(),
     });
   } catch (error) {
     console.error("AI Error:", error);

@@ -109,10 +109,8 @@ mqttClient.on("message", async (topic, message) => {
 
 app.get("/", (req, res) => res.send("🚀 Backend Maggenzim Running!"));
 
-// --- AI Chat Route ---
 app.post("/api/chat", aiController.chatWithAssistant);
 
-// --- Auth Routes ---
 app.post("/api/register", async (req, res) => {
   try {
     const { name, phone } = req.body;
@@ -155,9 +153,6 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
-// --- Device Management Routes ---
-
-// [BARU] Endpoint untuk mengambil semua device milik user (Sync saat login)
 app.get("/api/my-devices", async (req, res) => {
   try {
     const { user_id } = req.query;
@@ -309,7 +304,6 @@ app.get("/api/check-device", async (req, res) => {
   }
 });
 
-// --- Webhooks ---
 app.post("/whatsapp-webhook", async (req, res) => {
   const incomingMsg = req.body.Body.toLowerCase().trim();
   const fromNumber = req.body.From;
