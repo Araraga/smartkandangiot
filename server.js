@@ -1,11 +1,12 @@
 require("dotenv").config();
 const express = require("express");
 const mqtt = require("mqtt");
-const twilio = require("twilio");
 const cors = require("cors");
+const axios = require("axios"); // GANTI Twilio dengan Axios
 
 const pool = require("./config/db");
 const aiController = require("./controllers/ai_controller");
+const authRoutes = require("./routes/authRoutes"); // IMPORT Route OTP
 
 const app = express();
 
@@ -13,11 +14,7 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-const twilioClient = twilio(
-  process.env.TWILIO_ACCOUNT_SID,
-  process.env.TWILIO_AUTH_TOKEN
-);
-
+// --- SETUP MQTT (TIDAK BERUBAH) ---
 const mqttClient = mqtt.connect(process.env.MQTT_BROKER_URL, {
   username: process.env.MQTT_USERNAME,
   password: process.env.MQTT_PASSWORD,
@@ -33,6 +30,8 @@ mqttClient.on("connect", () => {
   });
 });
 
+// --- LOGIKA UTAMA MQTT (TIDAK BERUBAH) ---
+// Hanya fungsi sendWhatsApp di bagian bawah yang diganti mesinnya
 mqttClient.on("message", async (topic, message) => {
   try {
     const topicParts = topic.split("/");
@@ -88,12 +87,14 @@ mqttClient.on("message", async (topic, message) => {
       const device = deviceRes.rows[0];
       let alertMessage = "";
 
+      // Logika Peringatan
       if (Number(data.temperature) > Number(device.threshold_temp)) {
-        alertMessage = `⚠️ PERINGATAN! Suhu di ${device.device_name} tinggi: ${data.temperature}°C.`;
+        alertMessage = `⚠️ *PERINGATAN SUHU TINGGI!*\nLokasi: ${device.device_name}\nSuhu: ${data.temperature}°C`;
       } else if (Number(gasValue) > Number(device.threshold_gas)) {
-        alertMessage = `⚠️ PERINGATAN! Gas di ${device.device_name} tinggi: ${gasValue} PPM.`;
+        alertMessage = `⚠️ *PERINGATAN AMONIA TINGGI!*\nLokasi: ${device.device_name}\nGas: ${gasValue} PPM`;
       }
 
+      // Kirim WA Alert (Menggunakan fungsi baru Fonnte)
       if (
         alertMessage &&
         device.whatsapp_number &&
@@ -107,37 +108,31 @@ mqttClient.on("message", async (topic, message) => {
   }
 });
 
+// --- API ENDPOINTS ---
+
 app.get("/", (req, res) => res.send("🚀 Backend Maggenzim Running!"));
 
+// 1. FITUR AI (TIDAK BERUBAH)
 app.post("/api/chat", aiController.chatWithAssistant);
 
-app.post("/api/register", async (req, res) => {
-  try {
-    const { name, phone } = req.body;
-    if (!name || !phone) return res.status(400).json({ error: "Data kurang" });
-    const query = `
-      INSERT INTO users (full_name, phone_number) VALUES ($1, $2)
-      ON CONFLICT (phone_number) DO UPDATE SET full_name = EXCLUDED.full_name
-      RETURNING user_id, full_name, phone_number;
-    `;
-    const result = await pool.query(query, [name, phone]);
+// 2. FITUR OTP & AUTH (BARU - MENGGANTIKAN REGISTER LAMA)
+// Ini akan mengaktifkan: POST /auth/request-otp dan POST /auth/register
+app.use("/auth", authRoutes);
 
-    res.json({ status: "success", user: result.rows[0] });
-  } catch (err) {
-    console.error("❌ Register Error:", err);
-    res.status(500).json({ error: "Server Error" });
-  }
-});
-
+// 3. FITUR LOGIN BIASA (OPSIONAL: BISA TETAP DIPAKAI UNTUK LOGIN TANPA OTP)
 app.post("/api/login", async (req, res) => {
   try {
     const { phone } = req.body;
     if (!phone)
       return res.status(400).json({ error: "Nomor telepon wajib diisi" });
 
+    // Normalisasi nomor HP agar sesuai format DB (628...)
+    let formatted = phone.replace(/\D/g, "");
+    if (formatted.startsWith("0")) formatted = "62" + formatted.substring(1);
+
     const result = await pool.query(
       "SELECT * FROM users WHERE phone_number = $1",
-      [phone]
+      [formatted]
     );
 
     if (result.rows.length > 0) {
@@ -153,26 +148,19 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
+// --- FITUR DEVICE MANAGEMENT (TIDAK BERUBAH) ---
 app.get("/api/my-devices", async (req, res) => {
   try {
     const { user_id } = req.query;
-    if (!user_id) {
+    if (!user_id)
       return res
         .status(400)
         .json({ status: "error", message: "User ID diperlukan" });
-    }
 
-    const query = `
-      SELECT * FROM devices 
-      WHERE owned_by = $1 
-      ORDER BY device_name ASC
-    `;
+    const query = `SELECT * FROM devices WHERE owned_by = $1 ORDER BY device_name ASC`;
     const result = await pool.query(query, [user_id]);
 
-    res.json({
-      status: "success",
-      data: result.rows,
-    });
+    res.json({ status: "success", data: result.rows });
   } catch (err) {
     console.error("Error My Devices:", err);
     res.status(500).json({ error: "Server Error" });
@@ -183,28 +171,37 @@ app.post("/api/claim-device", async (req, res) => {
   try {
     const { device_id, user_id, user_phone } = req.body;
 
+    // Pastikan format nomor HP benar saat klaim
+    let formattedPhone = user_phone.replace(/\D/g, "");
+    if (formattedPhone.startsWith("0"))
+      formattedPhone = "62" + formattedPhone.substring(1);
+
     const check = await pool.query(
       "SELECT * FROM devices WHERE device_id = $1",
       [device_id]
     );
     if (check.rows.length === 0) {
-      return res.status(404).json({
-        status: "error",
-        message: "Perangkat belum dinyalakan/terdaftar.",
-      });
+      return res
+        .status(404)
+        .json({
+          status: "error",
+          message: "Perangkat belum dinyalakan/terdaftar.",
+        });
     }
     const device = check.rows[0];
 
     if (device.owned_by !== null && device.owned_by != user_id) {
-      return res.status(403).json({
-        status: "error",
-        message: "Perangkat sudah dimiliki orang lain!",
-      });
+      return res
+        .status(403)
+        .json({
+          status: "error",
+          message: "Perangkat sudah dimiliki orang lain!",
+        });
     }
 
     await pool.query(
       "UPDATE devices SET owned_by = $1, whatsapp_number = $2 WHERE device_id = $3",
-      [user_id, user_phone, device_id]
+      [user_id, formattedPhone, device_id]
     );
 
     res.json({
@@ -227,10 +224,12 @@ app.post("/api/release-device", async (req, res) => {
     );
 
     if (result.rowCount === 0) {
-      return res.status(403).json({
-        status: "error",
-        message: "Gagal hapus. Anda bukan pemilik sah.",
-      });
+      return res
+        .status(403)
+        .json({
+          status: "error",
+          message: "Gagal hapus. Anda bukan pemilik sah.",
+        });
     }
 
     console.log(`🗑️ Device ${device_id} dilepas User ${user_id}`);
@@ -304,52 +303,36 @@ app.get("/api/check-device", async (req, res) => {
   }
 });
 
-app.post("/whatsapp-webhook", async (req, res) => {
-  const incomingMsg = req.body.Body.toLowerCase().trim();
-  const fromNumber = req.body.From;
-
-  if (incomingMsg === "cek") {
-    try {
-      const deviceRes = await pool.query(
-        "SELECT * FROM devices WHERE whatsapp_number = $1 LIMIT 1",
-        [fromNumber]
-      );
-      if (deviceRes.rows.length === 0) {
-        await sendWhatsApp(fromNumber, "Nomor Anda belum terdaftar.");
-        return res.status(200).send();
-      }
-      const device = deviceRes.rows[0];
-      const dataRes = await pool.query(
-        "SELECT * FROM sensor_data WHERE device_id = $1 ORDER BY timestamp DESC LIMIT 1",
-        [device.device_id]
-      );
-
-      if (dataRes.rows.length === 0) {
-        await sendWhatsApp(fromNumber, "Belum ada data sensor.");
-        return res.status(200).send();
-      }
-
-      const d = dataRes.rows[0];
-      const reply = `*${device.device_name}*\nSuhu: ${Number(
-        d.temperature
-      ).toFixed(1)}°C\nAmonia: ${Number(d.gas_ppm).toFixed(1)} PPM`;
-      await sendWhatsApp(fromNumber, reply);
-    } catch (err) {
-      console.error(err);
-    }
-  }
-  res.status(200).send();
-});
-
+// --- FUNGSI KIRIM WHATSAPP (Diubah ke FONNTE) ---
+// Fungsi ini dipanggil oleh MQTT Alert di atas.
 async function sendWhatsApp(to, message) {
   try {
-    await twilioClient.messages.create({
-      body: message,
-      from: process.env.TWILIO_WHATSAPP_NUMBER,
-      to: to,
-    });
+    // Normalisasi nomor tujuan agar formatnya 62xxx (Wajib untuk Fonnte/Twilio)
+    let formatted = to.trim().replace(/\D/g, "");
+    if (formatted.startsWith("0")) formatted = "62" + formatted.substring(1);
+
+    const response = await axios.post(
+      "https://api.fonnte.com/send",
+      {
+        target: formatted,
+        message: message,
+        countryCode: "62",
+      },
+      {
+        headers: {
+          Authorization: process.env.FONNTE_TOKEN, // Pastikan token ada di .env
+        },
+      }
+    );
+
+    // Log status pengiriman
+    if (response.data.status) {
+      console.log(`✅ WA Alert ke ${to}: Terkirim`);
+    } else {
+      console.error(`❌ WA Alert ke ${to} Gagal:`, response.data.reason);
+    }
   } catch (err) {
-    console.error("Twilio Error:", err.message);
+    console.error("❌ Fonnte Error:", err.message);
   }
 }
 
