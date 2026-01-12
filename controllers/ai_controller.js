@@ -1,28 +1,21 @@
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const pool = require("../config/db");
 
-// Inisialisasi Google Gemini AI
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// Menggunakan model flash yang cepat
 const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
 exports.chatWithAssistant = async (req, res) => {
   const { message, device_id, user_id } = req.body;
 
-  // Validasi input pesan
   if (!message) {
-    return res
-      .status(400)
-      .json({
-        status: "error",
-        message: "Pesan wajib diisi untuk bertanya pada Prof. Jago.",
-      });
+    return res.status(400).json({
+      status: "error",
+      message: "Pesan wajib diisi untuk bertanya pada Prof. Jago.",
+    });
   }
 
   try {
-    // --- 1. PENGUMPULAN KONTEKS DATA SENSOR ---
-
     let sensorContext =
       "Saat ini tidak ada data sensor spesifik yang terlampir.";
 
