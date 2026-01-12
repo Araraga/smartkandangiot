@@ -20,6 +20,7 @@ const mqttClient = mqtt.connect(process.env.MQTT_BROKER_URL, {
   password: process.env.MQTT_PASSWORD,
   protocol: "mqtts",
   port: 8883,
+  rejectUnauthorized: false,
 });
 
 mqttClient.on("connect", () => {
@@ -181,22 +182,18 @@ app.post("/api/claim-device", async (req, res) => {
       [device_id]
     );
     if (check.rows.length === 0) {
-      return res
-        .status(404)
-        .json({
-          status: "error",
-          message: "Perangkat belum dinyalakan/terdaftar.",
-        });
+      return res.status(404).json({
+        status: "error",
+        message: "Perangkat belum dinyalakan/terdaftar.",
+      });
     }
     const device = check.rows[0];
 
     if (device.owned_by !== null && device.owned_by != user_id) {
-      return res
-        .status(403)
-        .json({
-          status: "error",
-          message: "Perangkat sudah dimiliki orang lain!",
-        });
+      return res.status(403).json({
+        status: "error",
+        message: "Perangkat sudah dimiliki orang lain!",
+      });
     }
 
     await pool.query(
@@ -224,12 +221,10 @@ app.post("/api/release-device", async (req, res) => {
     );
 
     if (result.rowCount === 0) {
-      return res
-        .status(403)
-        .json({
-          status: "error",
-          message: "Gagal hapus. Anda bukan pemilik sah.",
-        });
+      return res.status(403).json({
+        status: "error",
+        message: "Gagal hapus. Anda bukan pemilik sah.",
+      });
     }
 
     console.log(`🗑️ Device ${device_id} dilepas User ${user_id}`);
