@@ -1,11 +1,13 @@
 require("dotenv").config();
 const express = require("express");
 const mqtt = require("mqtt");
-const twilio = require("twilio");
 const cors = require("cors");
+const axios = require("axios"); // Wajib: npm install axios
 
+// Import Konfigurasi & Controller
 const pool = require("./config/db");
-const aiController = require("./controllers/ai_controller");
+const aiController = require("./controllers/ai_controller"); // Pastikan path benar
+const authRoutes = require("./routes/authRoutes"); // Route baru untuk OTP
 
 const app = express();
 
@@ -13,11 +15,7 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-const twilioClient = twilio(
-  process.env.TWILIO_ACCOUNT_SID,
-  process.env.TWILIO_AUTH_TOKEN
-);
-
+// --- 1. SETUP MQTT (HiveMQ) ---
 const mqttClient = mqtt.connect(process.env.MQTT_BROKER_URL, {
   username: process.env.MQTT_USERNAME,
   password: process.env.MQTT_PASSWORD,
@@ -27,18 +25,21 @@ const mqttClient = mqtt.connect(process.env.MQTT_BROKER_URL, {
 
 mqttClient.on("connect", () => {
   console.log("✅ Terhubung ke HiveMQ Broker!");
+  // Subscribe ke topik data dan register semua device
   mqttClient.subscribe(["devices/+/data", "devices/+/register"], (err) => {
     if (err) console.error("❌ Gagal subscribe:", err);
     else console.log("📡 Listening: Data & Register...");
   });
 });
 
+// --- 2. LOGIKA MQTT (Menangani Data Masuk) ---
 mqttClient.on("message", async (topic, message) => {
   try {
     const topicParts = topic.split("/");
     const deviceId = topicParts[1];
     const action = topicParts[2];
 
+    // A. Handle Register Device Baru (Plug & Play)
     if (action === "register") {
       const info = JSON.parse(message.toString());
       console.log(`🆕 [REGISTER] Sinyal dari ${deviceId}`);
@@ -56,17 +57,21 @@ mqttClient.on("message", async (topic, message) => {
       return;
     }
 
+    // B. Handle Data Sensor Masuk
     if (action === "data") {
       let rawData = JSON.parse(message.toString());
       let data = Array.isArray(rawData) ? rawData[0] : rawData;
 
       const gasValue = data.gas_ppm !== undefined ? data.gas_ppm : data.amonia;
+
+      // Skip jika data tidak lengkap
       if (data.temperature === undefined || gasValue === undefined) return;
 
       console.log(
         `📥 [DATA] ${deviceId}: Suhu=${data.temperature}, Gas=${gasValue}`
       );
 
+      // Pastikan device ada di DB (Auto-register jika belum ada)
       const ensureDeviceQuery = `
           INSERT INTO devices (device_id, device_name, type, whatsapp_number)
           VALUES ($1, $2, 'sensor', '')
@@ -74,11 +79,13 @@ mqttClient.on("message", async (topic, message) => {
       `;
       await pool.query(ensureDeviceQuery, [deviceId, `Perangkat ${deviceId}`]);
 
+      // Simpan Data ke Sensor Log
       await pool.query(
         "INSERT INTO sensor_data(device_id, temperature, humidity, gas_ppm) VALUES($1, $2, $3, $4)",
         [deviceId, data.temperature, data.humidity, gasValue]
       );
 
+      // Cek Ambang Batas (Threshold) untuk Alert WA
       const deviceRes = await pool.query(
         "SELECT * FROM devices WHERE device_id = $1",
         [deviceId]
@@ -88,56 +95,48 @@ mqttClient.on("message", async (topic, message) => {
       const device = deviceRes.rows[0];
       let alertMessage = "";
 
+      // Logika Alert Sederhana
       if (Number(data.temperature) > Number(device.threshold_temp)) {
-        alertMessage = `⚠️ PERINGATAN! Suhu di ${device.device_name} tinggi: ${data.temperature}°C.`;
+        alertMessage = `⚠️ *PERINGATAN SUHU TINGGI!*\n\nLokasi: ${device.device_name}\nSuhu Saat Ini: *${data.temperature}°C*\nBatas Aman: ${device.threshold_temp}°C\n\nMohon segera cek kondisi kandang!`;
       } else if (Number(gasValue) > Number(device.threshold_gas)) {
-        alertMessage = `⚠️ PERINGATAN! Gas di ${device.device_name} tinggi: ${gasValue} PPM.`;
+        alertMessage = `⚠️ *PERINGATAN AMONIA TINGGI!*\n\nLokasi: ${device.device_name}\nKadar Gas: *${gasValue} PPM*\nBatas Aman: ${device.threshold_gas} PPM\n\nMohon segera bersihkan kandang!`;
       }
 
+      // Kirim WA jika ada alert & nomor pemilik terdaftar
       if (
         alertMessage &&
         device.whatsapp_number &&
         device.whatsapp_number.length > 5
       ) {
-        await sendWhatsApp(device.whatsapp_number, alertMessage);
+        await sendWhatsAppFonnte(device.whatsapp_number, alertMessage);
       }
     }
   } catch (err) {
-    console.error("❌ Error MQTT:", err);
+    console.error("❌ Error MQTT Processing:", err.message);
   }
 });
+
+// --- 3. ROUTES API ---
 
 app.get("/", (req, res) => res.send("🚀 Backend Maggenzim Running!"));
 
+// Mount Route Auth (Ini yang menghubungkan fitur OTP tadi)
+// URL aksesnya jadi: /auth/request-otp dan /auth/register
+app.use("/auth", authRoutes);
+
 app.post("/api/chat", aiController.chatWithAssistant);
 
-app.post("/api/register", async (req, res) => {
-  try {
-    const { name, phone } = req.body;
-    if (!name || !phone) return res.status(400).json({ error: "Data kurang" });
-    const query = `
-      INSERT INTO users (full_name, phone_number) VALUES ($1, $2)
-      ON CONFLICT (phone_number) DO UPDATE SET full_name = EXCLUDED.full_name
-      RETURNING user_id, full_name, phone_number;
-    `;
-    const result = await pool.query(query, [name, phone]);
-
-    res.json({ status: "success", user: result.rows[0] });
-  } catch (err) {
-    console.error("❌ Register Error:", err);
-    res.status(500).json({ error: "Server Error" });
-  }
-});
-
+// Login Biasa (Tanpa OTP, hanya cek nomor) - Opsional jika mau diganti login OTP juga
 app.post("/api/login", async (req, res) => {
   try {
     const { phone } = req.body;
-    if (!phone)
-      return res.status(400).json({ error: "Nomor telepon wajib diisi" });
+    // Format nomor HP dulu biar seragam
+    let formatted = phone.replace(/\D/g, "");
+    if (formatted.startsWith("0")) formatted = "62" + formatted.substring(1);
 
     const result = await pool.query(
       "SELECT * FROM users WHERE phone_number = $1",
-      [phone]
+      [formatted]
     );
 
     if (result.rows.length > 0) {
@@ -145,7 +144,10 @@ app.post("/api/login", async (req, res) => {
     } else {
       res
         .status(404)
-        .json({ status: "error", message: "Nomor belum terdaftar." });
+        .json({
+          status: "error",
+          message: "Nomor belum terdaftar. Silakan register.",
+        });
     }
   } catch (err) {
     console.error("❌ Login Error:", err);
@@ -153,28 +155,19 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
+// Endpoint Device Management
 app.get("/api/my-devices", async (req, res) => {
   try {
     const { user_id } = req.query;
-    if (!user_id) {
+    if (!user_id)
       return res
         .status(400)
         .json({ status: "error", message: "User ID diperlukan" });
-    }
 
-    const query = `
-      SELECT * FROM devices 
-      WHERE owned_by = $1 
-      ORDER BY device_name ASC
-    `;
+    const query = `SELECT * FROM devices WHERE owned_by = $1 ORDER BY device_name ASC`;
     const result = await pool.query(query, [user_id]);
-
-    res.json({
-      status: "success",
-      data: result.rows,
-    });
+    res.json({ status: "success", data: result.rows });
   } catch (err) {
-    console.error("Error My Devices:", err);
     res.status(500).json({ error: "Server Error" });
   }
 });
@@ -183,28 +176,34 @@ app.post("/api/claim-device", async (req, res) => {
   try {
     const { device_id, user_id, user_phone } = req.body;
 
+    // Pastikan format nomor HP benar untuk update device
+    let formattedPhone = user_phone.replace(/\D/g, "");
+    if (formattedPhone.startsWith("0"))
+      formattedPhone = "62" + formattedPhone.substring(1);
+
     const check = await pool.query(
       "SELECT * FROM devices WHERE device_id = $1",
       [device_id]
     );
     if (check.rows.length === 0) {
-      return res.status(404).json({
-        status: "error",
-        message: "Perangkat belum dinyalakan/terdaftar.",
-      });
+      return res
+        .status(404)
+        .json({ status: "error", message: "ID Perangkat tidak ditemukan." });
     }
-    const device = check.rows[0];
 
+    const device = check.rows[0];
     if (device.owned_by !== null && device.owned_by != user_id) {
-      return res.status(403).json({
-        status: "error",
-        message: "Perangkat sudah dimiliki orang lain!",
-      });
+      return res
+        .status(403)
+        .json({
+          status: "error",
+          message: "Perangkat sudah dimiliki orang lain!",
+        });
     }
 
     await pool.query(
       "UPDATE devices SET owned_by = $1, whatsapp_number = $2 WHERE device_id = $3",
-      [user_id, user_phone, device_id]
+      [user_id, formattedPhone, device_id]
     );
 
     res.json({
@@ -213,7 +212,6 @@ app.post("/api/claim-device", async (req, res) => {
       type: device.type,
     });
   } catch (err) {
-    console.error("❌ Claim Error:", err);
     res.status(500).json({ error: "Server Error" });
   }
 });
@@ -227,16 +225,15 @@ app.post("/api/release-device", async (req, res) => {
     );
 
     if (result.rowCount === 0) {
-      return res.status(403).json({
-        status: "error",
-        message: "Gagal hapus. Anda bukan pemilik sah.",
-      });
+      return res
+        .status(403)
+        .json({
+          status: "error",
+          message: "Gagal hapus. Anda bukan pemilik sah.",
+        });
     }
-
-    console.log(`🗑️ Device ${device_id} dilepas User ${user_id}`);
-    res.json({ status: "success", message: "Perangkat dihapus." });
+    res.json({ status: "success", message: "Perangkat dilepas." });
   } catch (err) {
-    console.error("❌ Release Error:", err);
     res.status(500).json({ error: "Server Error" });
   }
 });
@@ -282,7 +279,6 @@ app.post("/api/schedule", async (req, res) => {
       JSON.stringify(newSchedule),
       { retain: true }
     );
-
     res.json({ status: "success" });
   } catch (err) {
     res.status(500).json({ error: "Server error" });
@@ -304,52 +300,33 @@ app.get("/api/check-device", async (req, res) => {
   }
 });
 
-app.post("/whatsapp-webhook", async (req, res) => {
-  const incomingMsg = req.body.Body.toLowerCase().trim();
-  const fromNumber = req.body.From;
-
-  if (incomingMsg === "cek") {
-    try {
-      const deviceRes = await pool.query(
-        "SELECT * FROM devices WHERE whatsapp_number = $1 LIMIT 1",
-        [fromNumber]
-      );
-      if (deviceRes.rows.length === 0) {
-        await sendWhatsApp(fromNumber, "Nomor Anda belum terdaftar.");
-        return res.status(200).send();
-      }
-      const device = deviceRes.rows[0];
-      const dataRes = await pool.query(
-        "SELECT * FROM sensor_data WHERE device_id = $1 ORDER BY timestamp DESC LIMIT 1",
-        [device.device_id]
-      );
-
-      if (dataRes.rows.length === 0) {
-        await sendWhatsApp(fromNumber, "Belum ada data sensor.");
-        return res.status(200).send();
-      }
-
-      const d = dataRes.rows[0];
-      const reply = `*${device.device_name}*\nSuhu: ${Number(
-        d.temperature
-      ).toFixed(1)}°C\nAmonia: ${Number(d.gas_ppm).toFixed(1)} PPM`;
-      await sendWhatsApp(fromNumber, reply);
-    } catch (err) {
-      console.error(err);
-    }
-  }
-  res.status(200).send();
-});
-
-async function sendWhatsApp(to, message) {
+// --- 4. HELPER FUNCTION: Kirim WA via Fonnte (Pengganti Twilio) ---
+async function sendWhatsAppFonnte(target, message) {
   try {
-    await twilioClient.messages.create({
-      body: message,
-      from: process.env.TWILIO_WHATSAPP_NUMBER,
-      to: to,
-    });
+    // Pastikan nomor berformat 62...
+    let formatted = target.trim().replace(/\D/g, "");
+    if (formatted.startsWith("0")) formatted = "62" + formatted.substring(1);
+
+    const response = await axios.post(
+      "https://api.fonnte.com/send",
+      {
+        target: formatted,
+        message: message,
+        countryCode: "62",
+      },
+      {
+        headers: {
+          Authorization: process.env.FONNTE_TOKEN,
+        },
+      }
+    );
+
+    console.log(
+      `📤 Alert WA Sent to ${target}:`,
+      response.data.status ? "OK" : "FAILED"
+    );
   } catch (err) {
-    console.error("Twilio Error:", err.message);
+    console.error("❌ Fonnte Error:", err.message);
   }
 }
 
