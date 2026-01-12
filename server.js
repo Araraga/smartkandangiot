@@ -1,12 +1,12 @@
 require("dotenv").config();
 const express = require("express");
-const mqtt = require("mqtt");
+// const mqtt = require("mqtt"); // <--- 1. Matikan Import MQTT
 const cors = require("cors");
-const axios = require("axios"); // GANTI Twilio dengan Axios
+const axios = require("axios");
 
 const pool = require("./config/db");
 const aiController = require("./controllers/ai_controller");
-const authRoutes = require("./routes/authRoutes"); // IMPORT Route OTP
+const authRoutes = require("./routes/authRoutes");
 
 const app = express();
 
@@ -14,8 +14,10 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// --- SETUP MQTT (TIDAK BERUBAH) ---
-const mqttClient = mqtt.connect(process.env.MQTT_BROKER_URL, {
+// ================================================================
+// ❌ BAGIAN MQTT DINONAKTIFKAN SEMENTARA AGAR TIDAK CRASH ❌
+// ================================================================
+/* const mqttClient = mqtt.connect(process.env.MQTT_BROKER_URL, {
   username: process.env.MQTT_USERNAME,
   password: process.env.MQTT_PASSWORD,
   protocol: "mqtts",
@@ -31,8 +33,7 @@ mqttClient.on("connect", () => {
   });
 });
 
-// --- LOGIKA UTAMA MQTT (TIDAK BERUBAH) ---
-// Hanya fungsi sendWhatsApp di bagian bawah yang diganti mesinnya
+// --- LOGIKA UTAMA MQTT ---
 mqttClient.on("message", async (topic, message) => {
   try {
     const topicParts = topic.split("/");
@@ -108,6 +109,8 @@ mqttClient.on("message", async (topic, message) => {
     console.error("❌ Error MQTT:", err);
   }
 });
+*/
+// ================================================================
 
 // --- API ENDPOINTS ---
 
@@ -116,11 +119,10 @@ app.get("/", (req, res) => res.send("🚀 Backend Maggenzim Running!"));
 // 1. FITUR AI (TIDAK BERUBAH)
 app.post("/api/chat", aiController.chatWithAssistant);
 
-// 2. FITUR OTP & AUTH (BARU - MENGGANTIKAN REGISTER LAMA)
-// Ini akan mengaktifkan: POST /auth/request-otp dan POST /auth/register
+// 2. FITUR OTP & AUTH
 app.use("/auth", authRoutes);
 
-// 3. FITUR LOGIN BIASA (OPSIONAL: BISA TETAP DIPAKAI UNTUK LOGIN TANPA OTP)
+// 3. FITUR LOGIN BIASA
 app.post("/api/login", async (req, res) => {
   try {
     const { phone } = req.body;
@@ -271,11 +273,13 @@ app.post("/api/schedule", async (req, res) => {
       [id, JSON.stringify(newSchedule.times)]
     );
 
-    mqttClient.publish(
+    // ⚠️ INI JUGA HARUS DIKOMENTARI SUPAYA TIDAK ERROR KARENA mqttClient TIDAK ADA
+    /* mqttClient.publish(
       `devices/${id}/commands/set_schedule`,
       JSON.stringify(newSchedule),
       { retain: true }
     );
+    */
 
     res.json({ status: "success" });
   } catch (err) {
@@ -298,11 +302,9 @@ app.get("/api/check-device", async (req, res) => {
   }
 });
 
-// --- FUNGSI KIRIM WHATSAPP (Diubah ke FONNTE) ---
-// Fungsi ini dipanggil oleh MQTT Alert di atas.
+// --- FUNGSI KIRIM WHATSAPP (Tetap aktif untuk OTP) ---
 async function sendWhatsApp(to, message) {
   try {
-    // Normalisasi nomor tujuan agar formatnya 62xxx (Wajib untuk Fonnte/Twilio)
     let formatted = to.trim().replace(/\D/g, "");
     if (formatted.startsWith("0")) formatted = "62" + formatted.substring(1);
 
@@ -315,12 +317,11 @@ async function sendWhatsApp(to, message) {
       },
       {
         headers: {
-          Authorization: process.env.FONNTE_TOKEN, // Pastikan token ada di .env
+          Authorization: process.env.FONNTE_TOKEN,
         },
       }
     );
 
-    // Log status pengiriman
     if (response.data.status) {
       console.log(`✅ WA Alert ke ${to}: Terkirim`);
     } else {
