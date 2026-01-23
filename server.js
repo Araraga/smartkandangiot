@@ -2,11 +2,11 @@ require("dotenv").config();
 const express = require("express");
 const mqtt = require("mqtt");
 const cors = require("cors");
-const axios = require("axios"); // GANTI Twilio dengan Axios
-
+const axios = require("axios");
+const cron = require("node-cron");
 const pool = require("./config/db");
 const aiController = require("./controllers/ai_controller");
-const authRoutes = require("./routes/authRoutes"); // IMPORT Route OTP
+const authRoutes = require("./routes/authRoutes");
 
 const app = express();
 
@@ -14,7 +14,6 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// --- SETUP MQTT (TIDAK BERUBAH) ---
 const mqttClient = mqtt.connect(process.env.MQTT_BROKER_URL, {
   username: process.env.MQTT_USERNAME,
   password: process.env.MQTT_PASSWORD,
@@ -31,8 +30,6 @@ mqttClient.on("connect", () => {
   });
 });
 
-// --- LOGIKA UTAMA MQTT (TIDAK BERUBAH) ---
-// Hanya fungsi sendWhatsApp di bagian bawah yang diganti mesinnya
 mqttClient.on("message", async (topic, message) => {
   try {
     const topicParts = topic.split("/");
