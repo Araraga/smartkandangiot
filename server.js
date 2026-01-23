@@ -21,7 +21,6 @@ const mqttClient = mqtt.connect(process.env.MQTT_BROKER_URL, {
   port: 8883,
   rejectUnauthorized: false,
 });
-s;
 
 mqttClient.on("connect", () => {
   console.log("✅ Terhubung ke HiveMQ Broker!");
