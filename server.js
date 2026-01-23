@@ -64,7 +64,7 @@ mqttClient.on("message", async (topic, message) => {
       if (data.temperature === undefined || gasValue === undefined) return;
 
       console.log(
-        `📥 [DATA] ${deviceId}: Suhu=${data.temperature}, Gas=${gasValue}`
+        `📥 [DATA] ${deviceId}: Suhu=${data.temperature}, Gas=${gasValue}`,
       );
 
       const ensureDeviceQuery = `
@@ -76,12 +76,12 @@ mqttClient.on("message", async (topic, message) => {
 
       await pool.query(
         "INSERT INTO sensor_data(device_id, temperature, humidity, gas_ppm) VALUES($1, $2, $3, $4)",
-        [deviceId, data.temperature, data.humidity, gasValue]
+        [deviceId, data.temperature, data.humidity, gasValue],
       );
 
       const deviceRes = await pool.query(
         "SELECT * FROM devices WHERE device_id = $1",
-        [deviceId]
+        [deviceId],
       );
       if (deviceRes.rows.length === 0) return;
 
@@ -133,7 +133,7 @@ app.post("/api/login", async (req, res) => {
 
     const result = await pool.query(
       "SELECT * FROM users WHERE phone_number = $1",
-      [formatted]
+      [formatted],
     );
 
     if (result.rows.length > 0) {
@@ -179,7 +179,7 @@ app.post("/api/claim-device", async (req, res) => {
 
     const check = await pool.query(
       "SELECT * FROM devices WHERE device_id = $1",
-      [device_id]
+      [device_id],
     );
     if (check.rows.length === 0) {
       return res.status(404).json({
@@ -198,7 +198,7 @@ app.post("/api/claim-device", async (req, res) => {
 
     await pool.query(
       "UPDATE devices SET owned_by = $1, whatsapp_number = $2 WHERE device_id = $3",
-      [user_id, formattedPhone, device_id]
+      [user_id, formattedPhone, device_id],
     );
 
     res.json({
@@ -217,7 +217,7 @@ app.post("/api/release-device", async (req, res) => {
     const { device_id, user_id } = req.body;
     const result = await pool.query(
       "UPDATE devices SET owned_by = NULL, whatsapp_number = '' WHERE device_id = $1 AND owned_by = $2",
-      [device_id, user_id]
+      [device_id, user_id],
     );
 
     if (result.rowCount === 0) {
@@ -240,7 +240,7 @@ app.get("/api/sensor-data", async (req, res) => {
     const { id } = req.query;
     const result = await pool.query(
       "SELECT timestamp, temperature, humidity, gas_ppm AS amonia FROM sensor_data WHERE device_id = $1 ORDER BY timestamp DESC LIMIT 20",
-      [id]
+      [id],
     );
     res.json(result.rows);
   } catch (err) {
@@ -253,7 +253,7 @@ app.get("/api/schedule", async (req, res) => {
     const { id } = req.query;
     const result = await pool.query(
       "SELECT times FROM schedules WHERE device_id = $1",
-      [id]
+      [id],
     );
     if (result.rows.length > 0) res.json(result.rows[0]);
     else res.json({ times: [] });
@@ -268,13 +268,13 @@ app.post("/api/schedule", async (req, res) => {
     const newSchedule = req.body;
     await pool.query(
       `INSERT INTO schedules (device_id, times) VALUES ($1, $2) ON CONFLICT (device_id) DO UPDATE SET times = $2, updated_at = NOW()`,
-      [id, JSON.stringify(newSchedule.times)]
+      [id, JSON.stringify(newSchedule.times)],
     );
 
     mqttClient.publish(
       `devices/${id}/commands/set_schedule`,
       JSON.stringify(newSchedule),
-      { retain: true }
+      { retain: true },
     );
 
     res.json({ status: "success" });
@@ -288,7 +288,7 @@ app.get("/api/check-device", async (req, res) => {
     const { id } = req.query;
     const result = await pool.query(
       "SELECT * FROM devices WHERE device_id = $1",
-      [id]
+      [id],
     );
     if (result.rows.length > 0)
       res.status(200).json({ status: "success", device: result.rows[0] });
@@ -317,7 +317,7 @@ async function sendWhatsApp(to, message) {
         headers: {
           Authorization: process.env.FONNTE_TOKEN, // Pastikan token ada di .env
         },
-      }
+      },
     );
 
     // Log status pengiriman
@@ -331,5 +331,25 @@ async function sendWhatsApp(to, message) {
   }
 }
 
+cron.schedule("0 0 * * *", async () => {
+  console.log("🧹 [CRON] Memulai pembersihan data lama...");
+
+  try {
+    // Query SQL untuk menghapus data yang lebih tua dari 7 hari
+    const query = `
+      DELETE FROM sensor_data 
+      WHERE timestamp < NOW() - INTERVAL '7 days'
+    `;
+
+    const result = await pool.query(query);
+
+    console.log(
+      `✅ [CRON] Selesai! Menghapus ${result.rowCount} baris data kadaluarsa.`,
+    );
+  } catch (err) {
+    console.error("❌ [CRON] Gagal membersihkan data:", err.message);
+  }
+});
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Server berjalan di port ${PORT}`));
+app.listen(PORT, () => console.log(`Server berjalan di port ${PORT}`));
