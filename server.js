@@ -85,14 +85,12 @@ mqttClient.on("message", async (topic, message) => {
       const device = deviceRes.rows[0];
       let alertMessage = "";
 
-      // Logika Peringatan
       if (Number(data.temperature) > Number(device.threshold_temp)) {
         alertMessage = `⚠️ *PERINGATAN SUHU TINGGI!*\nLokasi: ${device.device_name}\nSuhu: ${data.temperature}°C`;
       } else if (Number(gasValue) > Number(device.threshold_gas)) {
         alertMessage = `⚠️ *PERINGATAN AMONIA TINGGI!*\nLokasi: ${device.device_name}\nGas: ${gasValue} PPM`;
       }
 
-      // Kirim WA Alert (Menggunakan fungsi baru Fonnte)
       if (
         alertMessage &&
         device.whatsapp_number &&
@@ -109,22 +107,13 @@ mqttClient.on("message", async (topic, message) => {
 // --- API ENDPOINTS ---
 
 app.get("/", (req, res) => res.send("🚀 Backend Maggenzim Running!"));
-
-// 1. FITUR AI (TIDAK BERUBAH)
 app.post("/api/chat", aiController.chatWithAssistant);
-
-// 2. FITUR OTP & AUTH (BARU - MENGGANTIKAN REGISTER LAMA)
-// Ini akan mengaktifkan: POST /auth/request-otp dan POST /auth/register
 app.use("/auth", authRoutes);
-
-// 3. FITUR LOGIN BIASA (OPSIONAL: BISA TETAP DIPAKAI UNTUK LOGIN TANPA OTP)
 app.post("/api/login", async (req, res) => {
   try {
     const { phone } = req.body;
     if (!phone)
       return res.status(400).json({ error: "Nomor telepon wajib diisi" });
-
-    // Normalisasi nomor HP agar sesuai format DB (628...)
     let formatted = phone.replace(/\D/g, "");
     if (formatted.startsWith("0")) formatted = "62" + formatted.substring(1);
 
@@ -146,7 +135,6 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
-// --- FITUR DEVICE MANAGEMENT (TIDAK BERUBAH) ---
 app.get("/api/my-devices", async (req, res) => {
   try {
     const { user_id } = req.query;
@@ -168,8 +156,6 @@ app.get("/api/my-devices", async (req, res) => {
 app.post("/api/claim-device", async (req, res) => {
   try {
     const { device_id, user_id, user_phone } = req.body;
-
-    // Pastikan format nomor HP benar saat klaim
     let formattedPhone = user_phone.replace(/\D/g, "");
     if (formattedPhone.startsWith("0"))
       formattedPhone = "62" + formattedPhone.substring(1);
@@ -295,11 +281,8 @@ app.get("/api/check-device", async (req, res) => {
   }
 });
 
-// --- FUNGSI KIRIM WHATSAPP (Diubah ke FONNTE) ---
-// Fungsi ini dipanggil oleh MQTT Alert di atas.
 async function sendWhatsApp(to, message) {
   try {
-    // Normalisasi nomor tujuan agar formatnya 62xxx (Wajib untuk Fonnte/Twilio)
     let formatted = to.trim().replace(/\D/g, "");
     if (formatted.startsWith("0")) formatted = "62" + formatted.substring(1);
 
@@ -312,12 +295,11 @@ async function sendWhatsApp(to, message) {
       },
       {
         headers: {
-          Authorization: process.env.FONNTE_TOKEN, // Pastikan token ada di .env
+          Authorization: process.env.FONNTE_TOKEN,
         },
       },
     );
 
-    // Log status pengiriman
     if (response.data.status) {
       console.log(`✅ WA Alert ke ${to}: Terkirim`);
     } else {
@@ -332,7 +314,6 @@ cron.schedule("0 0 * * *", async () => {
   console.log("🧹 [CRON] Memulai pembersihan data lama...");
 
   try {
-    // Query SQL untuk menghapus data yang lebih tua dari 7 hari
     const query = `
       DELETE FROM sensor_data 
       WHERE timestamp < NOW() - INTERVAL '7 days'
