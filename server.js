@@ -21,6 +21,7 @@ const mqttClient = mqtt.connect(process.env.MQTT_BROKER_URL, {
   port: 8883,
   rejectUnauthorized: false,
 });
+s;
 
 mqttClient.on("connect", () => {
   console.log("✅ Terhubung ke HiveMQ Broker!");
@@ -221,10 +222,14 @@ app.post("/api/release-device", async (req, res) => {
 app.get("/api/sensor-data", async (req, res) => {
   try {
     const { id } = req.query;
-    const result = await pool.query(
-      "SELECT timestamp, temperature, humidity, gas_ppm AS amonia FROM sensor_data WHERE device_id = $1 ORDER BY timestamp DESC LIMIT 20",
-      [id],
-    );
+    const query = `
+      SELECT timestamp, temperature, humidity, gas_ppm AS amonia 
+      FROM sensor_data 
+      WHERE device_id = $1 
+      AND timestamp >= NOW() - INTERVAL '7 days'
+      ORDER BY timestamp ASC
+    `;
+    const result = await pool.query(query, [id]);
     res.json(result.rows);
   } catch (err) {
     res.status(500).json({ error: "DB Error" });
