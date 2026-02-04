@@ -236,6 +236,31 @@ app.get("/api/sensor-data", async (req, res) => {
   }
 });
 
+app.get("/api/get-schedule", async (req, res) => {
+  try {
+    const { id } = req.query;
+    if (!id) return res.status(400).json({ error: "Device ID required" });
+
+    const result = await pool.query(
+      "SELECT times FROM schedules WHERE device_id = $1",
+      [id],
+    );
+
+    if (result.rows.length > 0) {
+      // PostgreSQL menyimpan JSON sebagai string/object. Pastikan dikirim sebagai array.
+      let times = result.rows[0].times;
+      if (typeof times === "string") times = JSON.parse(times);
+
+      res.json({ status: "success", data: { times: times } });
+    } else {
+      res.json({ status: "success", data: { times: [] } });
+    }
+  } catch (err) {
+    console.error("❌ Error Get Schedule:", err);
+    res.status(500).json({ error: "Server Error" });
+  }
+});
+
 app.post("/api/schedule", async (req, res) => {
   try {
     const { id } = req.query;
