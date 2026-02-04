@@ -235,20 +235,31 @@ app.get("/api/sensor-data", async (req, res) => {
   }
 });
 
-app.get("/api/schedule", async (req, res) => {
+app.post("/api/schedule", async (req, res) => {
   try {
     const { id } = req.query;
-    const result = await pool.query(
-      "SELECT times FROM schedules WHERE device_id = $1",
-      [id],
+    const newSchedule = req.body;
+
+    await pool.query(
+      `INSERT INTO schedules (device_id, times) 
+       VALUES ($1, $2) 
+       ON CONFLICT (device_id) 
+       DO UPDATE SET times = $2, updated_at = NOW()`,
+      [id, JSON.stringify(newSchedule.times)],
     );
-    if (result.rows.length > 0) res.json(result.rows[0]);
-    else res.json({ times: [] });
+
+    mqttClient.publish(
+      `devices/${id}/commands/set_schedule`,
+      JSON.stringify(newSchedule),
+      { qos: 1, retain: true },
+    );
+
+    res.json({ status: "success" });
   } catch (err) {
-    res.status(500).json({ error: "DB Error" });
+    console.error("❌ Schedule Error:", err);
+    res.status(500).json({ error: "Server error" });
   }
 });
-
 app.post("/api/schedule", async (req, res) => {
   try {
     const { id } = req.query;
