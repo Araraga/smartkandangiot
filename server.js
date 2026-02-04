@@ -105,7 +105,6 @@ mqttClient.on("message", async (topic, message) => {
 });
 
 // --- API ENDPOINTS ---
-
 app.get("/", (req, res) => res.send("🚀 Backend Maggenzim Running!"));
 app.post("/api/chat", aiController.chatWithAssistant);
 app.use("/auth", authRoutes);
