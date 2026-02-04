@@ -247,7 +247,6 @@ app.get("/api/get-schedule", async (req, res) => {
     );
 
     if (result.rows.length > 0) {
-      // PostgreSQL menyimpan JSON sebagai string/object. Pastikan dikirim sebagai array.
       let times = result.rows[0].times;
       if (typeof times === "string") times = JSON.parse(times);
 
